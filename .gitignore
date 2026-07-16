@@ -2,6 +2,7 @@
 __pycache__/
 .playwright-mcp/
 .tools/
+.data/
 request.log
 startup.log
 server.pid

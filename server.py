@@ -9,6 +9,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from difflib import SequenceMatcher
@@ -16,6 +17,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Timer
 from typing import Any
+
+from characters import character_terms, get_character
+from worldbook import WorldbookMemoryStore, normalize_memory_update, normalize_namespace
 
 
 ROOT = Path(__file__).resolve().parent
@@ -42,8 +46,14 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.deepseek.com").strip().rstri
 AI_MODEL = os.getenv("AI_MODEL", "deepseek-chat").strip()
 AI_TIMEOUT = min(int(os.getenv("AI_TIMEOUT", "12")), 12)
 REQUEST_LOG = ROOT / "request.log"
-APP_VERSION = "2026.07.16.9"
+APP_VERSION = "2026.07.16.15"
 PID_FILE = ROOT / "server.pid"
+WORLD_BOOK = WorldbookMemoryStore(ROOT / ".data" / "worldbook.sqlite3")
+AFFINITY_REACTIONS = {"欣赏", "心动", "放松", "中立", "失望", "警惕", "反感"}
+AFFINITY_TRIGGERS = {
+    "坦诚", "守信", "尊重边界", "行动力", "价值观一致",
+    "敷衍", "失信", "油嘴滑舌", "越界", "价值观冲突", "普通交流",
+}
 
 
 def log_event(message: str) -> None:
@@ -76,7 +86,9 @@ SYSTEM_PROMPT = """
 10. suggestions 必须是用户接下来可能说的两句，使用用户视角的第一人称，从两个不同但都自然的方向回应林晚刚说的话；不可答非所问。
    两个选项不能只是同一句话的同义改写，也不能重复最近已经出现过的选项。一个可以顺着当前情绪，另一个应从不同角度自然推进。
    必须核对人物方向：林晚说“我教你”时，用户只能说“你认真教/我认真学”，不能说成“你认真学”；林晚说“你教我”时则相反。
-10. memory_updates 只保存用户明确透露、未来有用且稳定的信息，不推测；每条短句，最多3条。
+10. memory_updates 是长期记忆操作，最多3条。只保存用户明确透露、未来有用且稳定的信息，不推测，不保存临时动作、短暂情绪或场景道具。
+   action 为 upsert 时填写 content、type、keywords 和 importance；用户纠正旧资料时，在 replace_keywords 填旧记忆的主题关键词。
+   只有用户明确要求忘记某项资料时才使用 forget，并在 keywords 填要删除的主题；没有记忆变化则返回空数组。
 12. 判断用户最新输入是说出口的台词还是动作指令：普通聊天、问句和感受属于 dialogue；“握住她的手”“靠近她”“凑过去看屏幕，问她推荐哪里”“递给她……”都属于 action。动作句即使包含“问她/告诉她”，也必须放进 user_action_narration，不能当成用户说出口的原话。若为 dialogue，该字段必须为空。
 12. 优先自然回应用户，再参考当前结构化状态中的“建议推进动作”。不得为了完成导演动作而忽略用户语气，也不要求每轮都制造新事件。
 13. 不要连续围绕雨、猫、咖啡、冰淇淋、画画展开。除非用户主动提到，否则开场3轮后不要再回收这些开场素材；最近两轮 topic_domain 相同，本轮优先切换到新的男女关系话题域。
@@ -91,18 +103,49 @@ SYSTEM_PROMPT = """
 20. 摄影、照片、调色、构图、插画、画稿、咖啡馆和喝咖啡都只是临时素材，不是人物的全部。任一素材在最近对话出现两次后，本轮必须彻底离开它，不得换个名词继续聊。可转向旅行冲动、音乐与电影、食物偏好、运动、朋友聚会、童年糗事、消费观、工作野心、家庭边界、前任、嫉妒、穿衣风格、睡眠习惯、未来城市、临时冒险、双方秘密或新的约会事件。
 21. 不要在 reply 或 suggestions 使用括号舞台动作，例如“（走到门口）”“（挑眉）”“（站在原地）”。这些动作必须进入 narration；suggestions 只保留用户真正会说出口的话。连续的用户动作旁白与林晚动作旁白应合并成一个简洁场景变化，避免旁白刷屏。
 22. 当前故事中的对话双方是男性用户“你”和女性林晚。user_action_narration 只能用“你”和“林晚”，不得出现指代不明的“他/她”；narration 应优先明确写“林晚”或“你”。
+23. 对话必须能持续100轮而保持连续。主动找话题时，topic_source 只能来自：用户当前话语、当前矛盾、未完成事件、共同约定、长期记忆、角色生活线。禁止无依据地突然询问新兴趣、随机制造事故或用“换个话题”硬切。
+24. 话题推进优先级：先准确回应用户最新一句；再推进当前关系矛盾或未完成事件；再回扣共同约定、长期记忆或角色生活线。每次转场必须用上一句中的具体细节搭桥，让用户能看出为什么现在会聊到这里。
+25. 核心矛盾不能一两轮解决。对峙阶段先澄清双方立场，试探阶段交换理由或完成小合作，松动阶段承认对方一部分，信任阶段才暴露弱点，之后才能自然进入暧昧和确认。不得用一次道歉直接跳到亲密。
+26. 每轮 arc_update.last_beat 必须写本轮真正新增的关系节点，不能复述上一节点。除非用户明确推动，不得跨越两个以上关系阶段；resolved 只用于当前核心矛盾确实完成时。
+27. 避免长期重复：不得复用“我能感觉到”“谢谢你愿意告诉我”“那我问你一个问题”等开头；不得把同一问题换几个近义词再次询问。继续同一矛盾时，要推进新证据、新让步、新行动或新的关系含义。
+28. 每轮必须根据角色自己的价值观评价用户最新回答并填写 affinity_update。普通聊天通常为0；真正表现出坦诚、守信、尊重边界或行动力才可加分；敷衍、失信、油嘴滑舌、越界或价值观冲突可以减分。不得因为字数、礼貌词或单纯顺从自动加分，也不得惩罚有依据且尊重人的不同意见。
+29. 好感变化范围为-8到+6。-5以下只用于明确触碰底线或严重价值观冲突；轻微不合适通常为-1到-3。负向变化必须在 reply 中自然体现为失望、警惕、追问或拉开距离，不能嘴上完全接受却暗中扣分。
+30. 两个 suggestions 都必须是此刻真实的人可能说出的合理回答，不标注正确、错误、稳妥或冒险。一个可以较贴合角色已知价值观，另一个可以是合理但风险较高的防御、回避、不合时宜的玩笑或缺少依据的质疑；不得把高风险选项写成明显愚蠢、恶意或答非所问的陷阱。
 
 只输出一个合法 JSON 对象，不要输出 Markdown、代码块或解释。字段必须完整：
 {
   "reply": "林晚本轮说出口的话",
   "narration": "可选场景旁白，没有则为空字符串",
   "suggestions": ["用户可选回复A", "用户可选回复B"],
-  "memory_updates": ["用户明确透露的稳定信息"],
+  "memory_updates": [{
+    "action": "upsert|forget",
+    "content": "用户明确透露的稳定信息；forget 时可为空",
+    "type": "用户资料|偏好边界|关系事件|约定事项|共同经历",
+    "keywords": ["用于日后检索的主题词"],
+    "importance": 60,
+    "replace_keywords": ["需要被本条新事实覆盖的旧主题词"]
+  }],
   "topic": "2到6个汉字的本轮话题",
   "conversation_move": "2到8个汉字的实际推进方式",
   "interaction_pattern": "直接回应|信息交换|轻松对抗|共同想象|情绪承接|关系推进|生活分享|话题转场",
   "topic_domain": "关系试探|异性差异|约会偏好|边界占有|感情经历|吸引力|亲密距离|误会冲突|共同计划|生活目标",
   "initiative": "女主主动|自然回应",
+  "topic_source": "用户当前话语|当前矛盾|未完成事件|共同约定|长期记忆|角色生活线",
+  "affinity_update": {
+    "delta": 0,
+    "reason": "这轮具体言行如何符合或触碰角色价值观",
+    "reaction": "欣赏|心动|放松|中立|失望|警惕|反感",
+    "trigger": "坦诚|守信|尊重边界|行动力|价值观一致|敷衍|失信|油嘴滑舌|越界|价值观冲突|普通交流"
+  },
+  "arc_update": {
+    "phase": "对峙|试探|松动|信任|暧昧|确认",
+    "central_conflict": "核心矛盾变化，没有则为空字符串",
+    "shared_goal": "共同目标变化，没有则为空字符串",
+    "last_beat": "本轮新增的关系节点",
+    "tension_delta": 0,
+    "trust_delta": 0,
+    "resolved": false
+  },
   "scene_update": {
     "location": "地点变化，没有则为空字符串",
     "time": "时间变化，没有则为空字符串",
@@ -124,6 +167,56 @@ SYSTEM_PROMPT = """
 """.strip()
 
 
+def build_system_prompt(data: dict[str, Any]) -> str:
+    character = get_character(data)
+    terms = character_terms(character)
+    user_behavior = (
+        "用户在旁白中的行为、衣着、身体语言和社交身份必须符合成年女性表达；"
+        "不得称用户为先生、男孩、男人或兄弟，也不得添加男性生理特征。"
+        if character.get("gender") == "male" else ""
+    )
+    profile = (
+        "固定人物设定：\n"
+        f"- {terms['name']}，{character['age']}岁，住在{character['city']}，职业是{character['occupation']}。\n"
+        f"- {character['traits']}；喜欢{character['likes']}。\n"
+        f"- 核心价值观：{character['values']}。\n"
+        f"- 欣赏他人：{character['likes_in_people']}。\n"
+        f"- 不喜欢他人：{character['dislikes_in_people']}。明确底线：{character['hard_boundaries']}。\n"
+        f"- 说话方式：{character['voice']}。\n"
+        f"- {terms['character_pronoun']}不是客服、心理咨询师或没有主见的附和者，"
+        f"可以不同意、犹豫、开玩笑，也会分享自己的具体生活。\n"
+        "- 固定事实不可漂移。不要突然改变姓名、年龄、城市、职业、经历、性别或说话风格。\n"
+        f"- {terms['name']}的台词、动作、衣着与身体描写必须符合成年{terms['character_gender']}和既定性格，"
+        "不得误用另一性别的称谓或生理特征。\n"
+        f"- 当前用户是成年{terms['user_gender']}。{user_behavior}\n"
+    )
+    prompt = re.sub(
+        r"固定人物设定：\n- 林晚.*?\n- 温柔.*?\n- 她不是.*?\n- 固定事实不可漂移.*?\n",
+        profile,
+        SYSTEM_PROMPT,
+        count=1,
+    ).replace("林晚", terms["name"])
+    if character.get("gender") == "male":
+        prompt = prompt.replace(
+            f"男性用户“你”和女性{terms['name']}",
+            f"女性用户“你”和男性{terms['name']}",
+        )
+        prompt = prompt.replace("女主", "男主").replace("她", "他")
+    return prompt
+
+
+def active_initiative(data: dict[str, Any]) -> str:
+    return "男主主动" if get_character(data).get("gender") == "male" else "女主主动"
+
+
+def adapt_character_text(value: Any, data: dict[str, Any]) -> str:
+    character = get_character(data)
+    text = str(value).replace("林晚", str(character["name"]))
+    if character.get("gender") == "male":
+        text = text.replace("女主", "男主").replace("她", "他")
+    return text
+
+
 DIRECTOR_MOVES = [
     "主动分享新鲜事",
     "轻松观点碰撞",
@@ -137,13 +230,64 @@ DIRECTOR_MOVES = [
 
 
 def conversation_phase(turns: int) -> str:
-    if turns <= 3:
+    if turns <= 5:
         return "事件破冰：处理误会或帮助的余波，给出观察和轻度关系试探"
-    if turns <= 10:
-        return "吸引建立：谈异性差异、吸引点、约会偏好和相处边界"
-    if turns <= 25:
-        return "暧昧加深：允许嫉妒、占有欲、亲密习惯和过去感情"
-    return "关系发展：更直接表达偏爱，推进共同计划和新的约会场景"
+    if turns <= 15:
+        return "立场碰撞：围绕核心矛盾交换理由，通过小合作验证彼此"
+    if turns <= 30:
+        return "关系松动：承认对方一部分，形成共同目标和可兑现的约定"
+    if turns <= 50:
+        return "信任建立：回扣共同经历，暴露真实弱点，但保留性格差异"
+    if turns <= 75:
+        return "暧昧加深：允许嫉妒、边界、亲密习惯和过去感情进入"
+    return "关系深化：处理长期选择与新矛盾，用行动兑现偏爱，避免重复早期试探"
+
+
+TOPIC_SOURCES = {"用户当前话语", "当前矛盾", "未完成事件", "共同约定", "长期记忆", "角色生活线"}
+ARC_PHASES = ("对峙", "试探", "松动", "信任", "暧昧", "确认")
+
+
+def latest_is_substantive(text: str) -> bool:
+    compact = compact_text(text)
+    return len(compact) >= 5 and compact not in {"好的", "好吧", "嗯嗯", "继续", "然后呢", "你说", "可以"}
+
+
+def choose_topic_source(data: dict[str, Any]) -> str:
+    latest = str(data.get("latest_message", ""))
+    arc = data.get("arc") if isinstance(data.get("arc"), dict) else {}
+    scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
+    if latest_is_substantive(latest):
+        return "用户当前话语"
+    if arc.get("central_conflict") and not arc.get("resolved"):
+        return "当前矛盾"
+    if scene.get("open_loops"):
+        return "未完成事件"
+    if arc.get("shared_goal"):
+        return "共同约定"
+    if data.get("retrieved_memories") or data.get("memories"):
+        return "长期记忆"
+    return "角色生活线"
+
+
+def arc_director_guidance(data: dict[str, Any]) -> str:
+    arc = data.get("arc") if isinstance(data.get("arc"), dict) else {}
+    phase = str(arc.get("phase", "试探"))
+    conflict = str(arc.get("central_conflict", "彼此仍有未说清的分歧"))
+    goal = str(arc.get("shared_goal", "把当前事件处理清楚"))
+    source = choose_topic_source(data)
+    if phase == "对峙":
+        action = "澄清一个具体立场或拿出一条新证据，不立刻和好；可以提出一项能验证双方判断的小合作"
+    elif phase == "试探":
+        action = "回应对方理由，并用一个可执行的小行动测试信任；最多承认对方一部分"
+    elif phase == "松动":
+        action = "明确一次真实让步，同时保留尚未解决的差异，把共同目标推进一个可见步骤"
+    elif phase == "信任":
+        action = "回扣已经共同经历的具体细节，暴露一个与当前矛盾有关的弱点或顾虑"
+    elif phase == "暧昧":
+        action = "从当前事件自然说出偏爱或边界，让亲密含义建立在已经形成的信任上"
+    else:
+        action = "用行动兑现已有关系，同时引入与长期选择有关的新分歧，不能重演初识试探"
+    return f"话题来源={source}；当前阶段={phase}；围绕“{conflict}”，朝“{goal}”推进。{action}"
 
 
 def relationship_focus(text: str) -> bool:
@@ -212,44 +356,35 @@ def choose_director_move(data: dict[str, Any]) -> str:
     saturated_surfaces = saturated_surface_families(data)
 
     if len(recent_patterns) >= 2 and recent_patterns[-2:] == ["轻松对抗", "轻松对抗"]:
-        return "收束当前玩笑，承认一部分，并转入真实感受或具体生活"
+        return "收束当前玩笑，承认一部分；随后" + arc_director_guidance(data)
     if len(recent_initiatives) >= 2 and recent_initiatives[-2:] == ["自然回应", "自然回应"]:
-        return "强制女主主动：先给出自己的判断或暴露一点偏好，再发起关系试探、具体邀请或话题转场"
+        return "强制女主主动，但禁止随机开新话题；" + arc_director_guidance(data)
     if relationship_focus(latest) and not user_requests_scene_change(latest):
         return "留在当前场景正面回应关系问题：先明确林晚的真实态度，不用换地点逃避，不引入工作室、画馆、咖啡馆或手机没电等借口"
     if saturated_surfaces:
         blocked = "、".join(saturated_surfaces)
-        return f"素材疲劳强制转场：本轮禁止再出现{blocked}相关内容；不能只替换成吃饭、喝酒或散步，林晚必须主动制造关系张力，转向感情经历、异性边界、吸引力、嫉妒、偏爱或一个带误会的新事件"
+        return f"素材疲劳强制转场：本轮禁止再出现{blocked}相关内容，但不要抛弃当前关系线；" + arc_director_guidance(data)
     if len(recent_domains) >= 2 and recent_domains[-1] == recent_domains[-2]:
-        return f"主动换话题域：离开“{recent_domains[-1]}”，从吸引力、约会偏好、边界占有或感情经历中选择未重复的一项"
+        return f"连续使用“{recent_domains[-1]}”话题域；保留当前矛盾，改从新的证据、行动或关系含义切入。" + arc_director_guidance(data)
     if scene_age >= 8:
         if user_selected_destination(latest):
             return "用户已经选定目的地：自然承接选择，写出离开当前地点并进入途中或到达后的第一个具体细节，同时更新 scene_update.location；不要再次提供同一组选项"
         choices = "；".join(scene_candidates(data)[:2])
         return f"当前场景可以收束，但不要擅自决定目的地。给用户两个反差选择：{choices}。用户未选择前 scene_update.location 必须留空，两个 suggestions 分别对应两个场景"
     if re.search(r"难过|焦虑|害怕|压力|失眠|孤独|委屈|累|崩溃", latest):
-        return "先承接具体情绪，不说教，不急着转移话题"
+        return "先承接具体情绪，不说教，不急着转移话题；只在回应后用当前关系线中的细节继续"
     if latest.endswith(("?", "？")):
-        return "直接回答问题，再补充一个属于林晚的具体信息"
+        return "先直接回答问题，再用回答中的一个具体细节连接关系线；" + arc_director_guidance(data)
     if mature_enabled and turns >= 8 and not any(
         domain in {"亲密距离", "吸引力", "边界占有"} for domain in recent_domains[-3:]
     ):
-        return "成熟暧昧推进：林晚先坦白一个具体吸引点或亲密边界，再用靠近、亲吻、独处或留宿的克制暗示试探两人的距离"
+        return "成熟暧昧推进：靠近、亲吻等亲密表达只能从当前矛盾中的信任变化自然产生，不得突然转色情话题；" + arc_director_guidance(data)
     if scene.get("open_loops") and "回扣旧细节" not in recent_moves[-3:] and scene_age < 6:
-        return "自然回扣一个尚未完成的约定或事件"
-    if turns <= 3:
-        return "林晚主动说出对用户刚才行为的观察，并做一次轻度关系试探"
-    if turns <= 10:
-        return "林晚先分享自己的约会偏好或吸引点，再把话题推进到两人的可能性"
-    if turns <= 25:
-        return "林晚主动谈一个关于嫉妒、边界、前任或亲密习惯的具体观点"
+        return "自然回扣一个尚未完成的约定或事件；" + arc_director_guidance(data)
     if life.get("current_problem") and "分享真实弱点" not in recent_moves[-4:]:
-        return "在合适时透露生活线中的一个真实但不过重的烦恼"
+        return "只有能与用户刚才的话或当前矛盾建立明确因果时，才透露生活线中的真实烦恼；" + arc_director_guidance(data)
 
-    for candidate in DIRECTOR_MOVES:
-        if candidate not in recent_moves[-4:]:
-            return candidate
-    return "自然承接，不强行推进"
+    return arc_director_guidance(data)
 
 
 def endpoint_url() -> str:
@@ -259,24 +394,38 @@ def endpoint_url() -> str:
 
 
 def build_messages(data: dict[str, Any]) -> list[dict[str, str]]:
+    character = get_character(data)
+    terms = character_terms(character)
     relationship = data.get("relationship") or {}
     turns = int(data.get("turns", 0) or 0)
     context = {
         "当前关系阶段": relationship.get("name", "初识"),
         "关系说明": relationship.get("copy", "刚刚认识"),
+        "当前扮演角色": {
+            "姓名": character["name"],
+            "性别": terms["character_gender"],
+            "职业": character["occupation"],
+            "类型": character["archetype"],
+        },
+        "用户主角性别": terms["user_gender"],
         "已经完成的用户轮数": data.get("turns", 0),
-        "已确认的用户记忆": data.get("memories", []),
+        "本轮检索到的长期记忆": data.get("retrieved_memories", data.get("memories", [])),
         "最近话题": data.get("topics", []),
         "最近逐轮话题（避免连续复用）": data.get("recent_topics", []),
         "最近话题域（同一域不得连续三轮）": data.get("recent_topic_domains", []),
         "最近推进方式（禁止连续复用）": data.get("recent_moves", []),
         "最近互动模式（同一种最多连续两轮）": data.get("recent_patterns", []),
         "最近主动性（连续两轮自然回应后必须女主主动）": data.get("recent_initiatives", []),
+        "最近话题来源（避免机械轮换）": data.get("recent_topic_sources", []),
+        "最近剧情节点（不得重复）": data.get("recent_story_beats", []),
+        "长期回复开头黑名单（不得复用或近义复述）": data.get("recent_reply_openings", []),
         "本轮禁用的疲劳素材（不得再提及或换同义词延续）": saturated_surface_families(data),
         "长期对话阶段": conversation_phase(turns),
-        "建议推进动作（自然合适才采用）": choose_director_move(data),
+        "建议推进动作（自然合适才采用）": adapt_character_text(choose_director_move(data), data),
         "最近已经展示过的用户选项（禁止重复或近义复用）": data.get("recent_suggestions", []),
         "当前场景状态": data.get("scene", {}),
+        "当前关系弧线": data.get("arc", {}),
+        "本轮应采用的话题来源": choose_topic_source(data),
         "当前场景已持续轮数": data.get("scene_age_turns", 0),
         "结合时间与上下文生成的场景候选（不是强制目的地）": scene_candidates(data),
         "最近到过的地点（禁止短期重复）": data.get("recent_locations", []),
@@ -286,7 +435,7 @@ def build_messages(data: dict[str, Any]) -> list[dict[str, str]]:
         "当前生活线": data.get("life", {}),
     }
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt(data)},
         {"role": "system", "content": "当前结构化状态：" + json.dumps(context, ensure_ascii=False)},
     ]
 
@@ -325,7 +474,7 @@ TOPIC_DOMAINS = {
     "吸引力", "亲密距离", "误会冲突", "共同计划", "生活目标",
 }
 
-INITIATIVES = {"女主主动", "自然回应"}
+INITIATIVES = {"女主主动", "男主主动", "自然回应"}
 
 TENSION_DOMAINS = {
     "关系试探", "异性差异", "约会偏好", "边界占有", "感情经历",
@@ -340,10 +489,11 @@ SURFACE_FAMILIES = {
     "雨天": r"下雨|雨天|屋檐|躲雨|雨伞",
 }
 
-ASSISTANT_ACTION_START = (
-    r"(?:我|林晚|她)(?:伸手|抬手|指指|指了指|指向|低头|侧身|起身|站起|坐下|走向|"
-    r"靠近|凑近|握住|牵住|吻|笑着|看着|望着|转身|递给|拿起|放下|晃了晃|歪头)"
+ASSISTANT_ACTION_VERBS = (
+    r"伸手|抬手|指指|指了指|指向|低头|侧身|起身|站起|坐下|走向|"
+    r"靠近|凑近|握住|牵住|吻|笑着|看着|望着|转身|递给|拿起|放下|晃了晃|歪头"
 )
+ASSISTANT_ACTION_START = rf"(?:我)(?:{ASSISTANT_ACTION_VERBS})"
 
 
 def clean_optional_text(value: Any, limit: int = 80) -> str:
@@ -363,49 +513,65 @@ def clean_string_list(value: Any, limit: int = 8) -> list[str]:
     return cleaned[:limit]
 
 
-def split_leading_assistant_action(reply: str, narration: str) -> tuple[str, str]:
+def replace_person_pronoun(text: str, pronoun: str, replacement: str) -> str:
+    if pronoun == "他":
+        return re.sub(r"(?<!其)他", replacement, text)
+    return text.replace(pronoun, replacement)
+
+
+def split_leading_assistant_action(
+    reply: str, narration: str, character: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    character = character or get_character()
+    terms = character_terms(character)
+    name = re.escape(terms["name"])
+    pronoun = terms["character_pronoun"]
+    action_start = rf"(?:我|{name}|{pronoun})(?:{ASSISTANT_ACTION_VERBS})"
     parenthetical = re.match(r"^\s*[（(]([^）)]+)[）)]\s*(.+)$", reply, flags=re.DOTALL)
     if parenthetical:
         action, spoken = parenthetical.groups()
         action = action.strip()
-        if not re.match(r"林晚|她|我", action):
-            action = "林晚" + action
-        action = re.sub(r"^(?:我|她)", "林晚", action).rstrip("。！？") + "。"
+        if not re.match(rf"{name}|{pronoun}|我", action):
+            action = terms["name"] + action
+        action = re.sub(rf"^(?:我|{pronoun})", terms["name"], action).rstrip("。！？") + "。"
         return spoken.strip(), narration or action
     quoted = re.match(
-        rf"^({ASSISTANT_ACTION_START}[^：:\n]{{0,60}})[：:]\s*[“\"‘'](.+?)[”\"’']?\s*$",
+        rf"^({action_start}[^：:\n]{{0,60}})[：:]\s*[“\"‘'](.+?)[”\"’']?\s*$",
         reply,
         flags=re.DOTALL,
     )
     if quoted:
         action, spoken = quoted.groups()
     else:
-        sentence = re.match(rf"^({ASSISTANT_ACTION_START}[^。！？\n]{{0,60}})[。！？]\s*(.+)$", reply, flags=re.DOTALL)
+        sentence = re.match(rf"^({action_start}[^。！？\n]{{0,60}})[。！？]\s*(.+)$", reply, flags=re.DOTALL)
         if not sentence:
             return reply, narration
         action, spoken = sentence.groups()
-    action = re.sub(r"^我", "林晚", action.strip()).rstrip("。！？") + "。"
+    action = re.sub(r"^我", terms["name"], action.strip()).rstrip("。！？") + "。"
     next_narration = narration or action
     return spoken.strip().strip("“”‘’\"'"), next_narration
 
 
-def normalize_scene_narration(value: str) -> str:
+def normalize_scene_narration(value: str, character: dict[str, Any] | None = None) -> str:
+    terms = character_terms(character or get_character())
     text = value.strip()
-    text = re.sub(r"(?<![\w])她", "林晚", text)
-    text = re.sub(r"他(?=的|[，。！？、]|$)", "你", text)
+    text = replace_person_pronoun(text, terms["character_pronoun"], terms["name"])
+    text = replace_person_pronoun(text, terms["user_pronoun"], "你")
     return text
 
 
-def normalize_user_action_narration(value: str) -> str:
+def normalize_user_action_narration(value: str, character: dict[str, Any] | None = None) -> str:
+    terms = character_terms(character or get_character())
     text = value.strip().strip("（）()")
-    text = text.replace("她", "林晚")
-    text = re.sub(r"他(?=的|[，。！？、]|$)", "林晚", text)
+    text = replace_person_pronoun(text, terms["character_pronoun"], terms["name"])
+    text = replace_person_pronoun(text, terms["user_pronoun"], terms["name"])
     if text and not text.startswith("你"):
         text = "你" + text.lstrip("我")
     return text.rstrip("。！？!?") + "。" if text else ""
 
 
-def clean_suggestion_text(value: Any) -> str:
+def clean_suggestion_text(value: Any, character: dict[str, Any] | None = None) -> str:
+    terms = character_terms(character or get_character())
     text = str(value or "").strip()
     match = re.match(r"^\s*[（(]([^）)]+)[）)]\s*(.*)$", text, flags=re.DOTALL)
     if not match:
@@ -413,7 +579,7 @@ def clean_suggestion_text(value: Any) -> str:
     action, spoken = match.groups()
     if spoken.strip():
         return spoken.strip()
-    return action.strip().replace("她", "林晚").replace("他", "林晚")
+    return action.strip().replace("她", terms["name"]).replace("他", terms["name"])
 
 
 def normalize_location(value: Any) -> str:
@@ -524,11 +690,39 @@ def choose_fallback_domain(result: dict[str, Any], data: dict[str, Any]) -> str:
     return "共同计划"
 
 
-def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
+def normalize_affinity_update(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    try:
+        delta = int(raw.get("delta", 0) or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    delta = max(-8, min(delta, 6))
+    reaction = clean_optional_text(raw.get("reaction"), 8)
+    if reaction not in AFFINITY_REACTIONS:
+        reaction = "欣赏" if delta > 0 else "失望" if delta < 0 else "中立"
+    if delta > 0 and reaction in {"失望", "警惕", "反感"}:
+        reaction = "欣赏"
+    elif delta < 0 and reaction in {"欣赏", "心动", "放松"}:
+        reaction = "失望"
+    elif delta == 0:
+        reaction = "中立"
+    trigger = clean_optional_text(raw.get("trigger"), 12)
+    if trigger not in AFFINITY_TRIGGERS:
+        trigger = "普通交流"
+    reason = clean_optional_text(raw.get("reason"), 100)
+    if not reason:
+        reason = "这轮没有形成明确的好感变化" if delta == 0 else "这轮言行触发了角色的价值判断"
+    return {"delta": delta, "reason": reason, "reaction": reaction, "trigger": trigger}
+
+
+def normalize_result(
+    result: dict[str, Any], character: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    character = character or get_character()
     reply = str(result.get("reply", "")).strip()
     narration = str(result.get("narration", "")).strip()
-    reply, narration = split_leading_assistant_action(reply, narration)
-    narration = normalize_scene_narration(narration)
+    reply, narration = split_leading_assistant_action(reply, narration, character)
+    narration = normalize_scene_narration(narration, character)
     suggestions = result.get("suggestions", [])
     memories = result.get("memory_updates", [])
     topic = str(result.get("topic", "闲聊")).strip()[:12]
@@ -542,6 +736,47 @@ def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
     initiative = clean_optional_text(result.get("initiative"), 8)
     if initiative not in INITIATIVES:
         initiative = "自然回应"
+    elif initiative in {"女主主动", "男主主动"}:
+        initiative = "男主主动" if character.get("gender") == "male" else "女主主动"
+    topic_source = clean_optional_text(result.get("topic_source"), 12)
+    if topic_source not in TOPIC_SOURCES:
+        topic_source = "用户当前话语"
+    affinity_update = normalize_affinity_update(result.get("affinity_update"))
+
+    raw_arc = result.get("arc_update")
+    if not isinstance(raw_arc, dict):
+        raw_arc = {}
+    arc_phase = clean_optional_text(raw_arc.get("phase"), 8)
+    if arc_phase not in ARC_PHASES:
+        arc_phase = ""
+    try:
+        tension_delta = int(raw_arc.get("tension_delta", 0) or 0)
+    except (TypeError, ValueError):
+        tension_delta = 0
+    try:
+        trust_delta = int(raw_arc.get("trust_delta", 0) or 0)
+    except (TypeError, ValueError):
+        trust_delta = 0
+    arc_update = {
+        "phase": arc_phase,
+        "central_conflict": clean_optional_text(raw_arc.get("central_conflict"), 180),
+        "shared_goal": clean_optional_text(raw_arc.get("shared_goal"), 160),
+        "last_beat": clean_optional_text(raw_arc.get("last_beat"), 160),
+        "tension_delta": max(-12, min(tension_delta, 12)),
+        "trust_delta": max(-8, min(trust_delta, 8)),
+        "resolved": raw_arc.get("resolved") is True,
+    }
+    affinity_delta = affinity_update["delta"]
+    if affinity_delta <= -5:
+        arc_update["trust_delta"] = min(arc_update["trust_delta"], -2)
+        arc_update["tension_delta"] = max(arc_update["tension_delta"], 2)
+    elif affinity_delta < 0:
+        arc_update["trust_delta"] = min(arc_update["trust_delta"], -1)
+        arc_update["tension_delta"] = max(arc_update["tension_delta"], 1)
+    elif affinity_delta >= 4:
+        arc_update["trust_delta"] = max(arc_update["trust_delta"], 2)
+    elif affinity_delta > 0:
+        arc_update["trust_delta"] = max(arc_update["trust_delta"], 1)
 
     raw_scene = result.get("scene_update")
     if not isinstance(raw_scene, dict):
@@ -572,17 +807,23 @@ def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
     if user_message_type == "dialogue":
         user_action_narration = ""
     else:
-        user_action_narration = normalize_user_action_narration(user_action_narration)
+        user_action_narration = normalize_user_action_narration(user_action_narration, character)
     return {
         "reply": reply,
         "narration": narration,
-        "suggestions": [clean_suggestion_text(item) for item in suggestions[:2]],
-        "memory_updates": [str(item).strip() for item in memories[:3]] if isinstance(memories, list) else [],
+        "suggestions": [clean_suggestion_text(item, character) for item in suggestions[:2]],
+        "memory_updates": [
+            normalized for item in memories[:3]
+            if (normalized := normalize_memory_update(item)) is not None
+        ] if isinstance(memories, list) else [],
         "topic": topic,
         "conversation_move": conversation_move,
         "interaction_pattern": interaction_pattern,
         "topic_domain": topic_domain,
         "initiative": initiative,
+        "topic_source": topic_source,
+        "affinity_update": affinity_update,
+        "arc_update": arc_update,
         "scene_update": scene_update,
         "life_update": life_update,
         "user_message_type": user_message_type,
@@ -591,20 +832,27 @@ def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def infer_user_action(data: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    character = get_character(data)
+    terms = character_terms(character)
+    target = terms["character_pronoun"]
+    name = re.escape(terms["name"])
     latest = str(data.get("latest_message", "")).strip()
     action_start = (
         r"^(?:我|你)?(?:[（(]|握住|牵住|拉住|抱住|靠近|凑近|凑过去|凑到|递给|喂给|抬手|低头|"
-        r"摸摸|亲吻|吻住|搂住|推开|引导她|看着她|走向她|走过去|坐到|站到|看屏幕|指向|问她|问林晚|告诉她|告诉林晚|对她说)"
+        rf"摸摸|亲吻|吻住|搂住|推开|引导{target}|看着{target}|走向{target}|走过去|坐到|站到|"
+        rf"看屏幕|指向|问{target}|问{name}|告诉{target}|告诉{name}|对{target}说)"
     )
-    action_clause = r"[，,](?:然后|顺势|再)?(?:凑|靠|走|坐|站|伸手|抬手|问她|告诉她|对她说)"
+    action_clause = rf"[，,](?:然后|顺势|再)?(?:凑|靠|走|坐|站|伸手|抬手|问{target}|告诉{target}|对{target}说)"
     looks_like_action = bool(re.search(action_start, latest) or re.search(action_clause, latest))
     if looks_like_action:
         result["user_message_type"] = "action"
         if not result.get("user_action_narration"):
             action = latest.rstrip("。！？!?")
-            result["user_action_narration"] = normalize_user_action_narration(action)
+            result["user_action_narration"] = normalize_user_action_narration(action, character)
         else:
-            result["user_action_narration"] = normalize_user_action_narration(result["user_action_narration"])
+            result["user_action_narration"] = normalize_user_action_narration(
+                result["user_action_narration"], character
+            )
     else:
         result["user_message_type"] = "dialogue"
         result["user_action_narration"] = ""
@@ -641,6 +889,8 @@ def text_similarity(left: str, right: str) -> float:
 
 def validate_result(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    character = get_character(data)
+    terms = character_terms(character)
     reply = result["reply"]
     suggestions = result["suggestions"]
     latest = str(data.get("latest_message", "")).strip()
@@ -671,7 +921,7 @@ def validate_result(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
                 break
 
     action_patterns = [
-        r"(?:林晚|她|女孩)[^。！？\n]{0,28}(?:愣|怔|咬|抿|垂|抬|靠|凑|握|牵|吻|笑|看|望|呼吸|眼神|耳尖|脸颊|下唇|手指)",
+        rf"(?:{re.escape(terms['name'])}|{terms['character_pronoun']}|男生|女孩)[^。！？\n]{{0,28}}(?:愣|怔|咬|抿|垂|抬|靠|凑|握|牵|吻|笑|看|望|呼吸|眼神|耳尖|脸颊|下唇|手指)",
         r"(?:呼吸|眼神|眸|耳尖|脸颊|手指|唇角)[^。！？\n]{0,18}(?:一滞|加快|闪|躲|红|颤|收紧|扬起)",
         r"[（(][^）)]*(?:动作|神态|轻笑|脸红|靠近|低头)[^）)]*[）)]",
     ]
@@ -688,7 +938,7 @@ def validate_result(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
     recent = data.get("recent_suggestions", [])
     if isinstance(recent, list):
         for suggestion in suggestions[:2]:
-            for old in recent[-12:]:
+            for old in recent[-60:]:
                 if text_similarity(str(suggestion), str(old)) >= 0.92:
                     errors.append(f"suggestion“{suggestion}”与最近展示过的选项重复或过于近似；请换一个新的表达和推进方向")
                     break
@@ -701,7 +951,7 @@ def validate_result(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
     if recent_patterns == ["轻松对抗", "轻松对抗"] and result.get("interaction_pattern") == "轻松对抗":
         errors.append("已经连续两轮用玩笑反制继续加码；本轮应该收束玩法并转入具体生活、感受或关系含义")
     recent_initiatives = [str(item) for item in data.get("recent_initiatives", [])[-2:]]
-    if recent_initiatives == ["自然回应", "自然回应"] and result.get("initiative") != "女主主动":
+    if recent_initiatives == ["自然回应", "自然回应"] and result.get("initiative") != active_initiative(data):
         errors.append("女主已连续两轮只做自然回应；本轮必须主动分享、观察、邀请、关系试探或切换话题")
     recent_domains = [str(item) for item in data.get("recent_topic_domains", [])[-2:]]
     if len(recent_domains) == 2 and recent_domains[0] == recent_domains[1] == result.get("topic_domain"):
@@ -715,7 +965,22 @@ def validate_result(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
         errors.append(f"{candidate_family}素材已重复出现；本轮必须彻底离开该素材并开启不同类型的话题或事件")
     if requires_tension_pivot(data) and result.get("topic_domain") not in TENSION_DOMAINS:
         errors.append("重复素材后的转场仍然过于日常；不能只换成吃饭、喝酒或散步，必须进入吸引力、关系试探、异性边界、感情经历或误会冲突")
-    return errors
+    reply_opening = str(result.get("reply", "")).replace("\n", " ").strip()[:28]
+    for old_opening in data.get("recent_reply_openings", [])[-80:]:
+        old_text = str(old_opening).strip()
+        if len(reply_opening) >= 10 and (
+            text_similarity(reply_opening, old_text) >= 0.90
+            or (len(old_text) >= 10 and (reply_opening.startswith(old_text) or old_text.startswith(reply_opening)))
+        ):
+            errors.append("reply 开头与长期历史中的表达过于相似；必须换一种具体回应方式，不能复用旧句式")
+            break
+    beat = str(result.get("arc_update", {}).get("last_beat", "")).strip()
+    if beat and any(text_similarity(beat, str(old)) >= 0.90 for old in data.get("recent_story_beats", [])[-32:]):
+        errors.append("arc_update.last_beat 重复了旧剧情节点；本轮必须产生新证据、新让步、新行动或新的关系含义")
+    arc = data.get("arc") if isinstance(data.get("arc"), dict) else {}
+    if arc.get("central_conflict") and result.get("topic_source") == "角色生活线" and not latest_is_substantive(latest):
+        errors.append("当前矛盾尚未解决，不能无桥接跳到角色生活线；应先从矛盾、未完成事件或共同目标继续")
+    return [adapt_character_text(error, data) for error in errors]
 
 
 def hard_validation_errors(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
@@ -752,7 +1017,7 @@ def hard_validation_errors(result: dict[str, Any], data: dict[str, Any]) -> list
         errors.append("两个 suggestions 完全相同")
     recent = {
         compact_text(str(item))
-        for item in data.get("recent_suggestions", [])[-12:]
+        for item in data.get("recent_suggestions", [])[-60:]
         if compact_text(str(item))
     }
     if any(item in recent for item in suggestions):
@@ -765,7 +1030,7 @@ def hard_validation_errors(result: dict[str, Any], data: dict[str, Any]) -> list
     if recent_patterns == ["轻松对抗", "轻松对抗"] and result.get("interaction_pattern") == "轻松对抗":
         errors.append("已经连续两轮轻松对抗；必须停止继续加码，转入具体生活、感受或关系含义")
     recent_initiatives = [str(item) for item in data.get("recent_initiatives", [])[-2:]]
-    if recent_initiatives == ["自然回应", "自然回应"] and result.get("initiative") != "女主主动":
+    if recent_initiatives == ["自然回应", "自然回应"] and result.get("initiative") != active_initiative(data):
         errors.append("女主已连续两轮被动；本轮必须由女主主动推进")
     recent_domains = [str(item) for item in data.get("recent_topic_domains", [])[-2:]]
     if len(recent_domains) == 2 and recent_domains[0] == recent_domains[1] == result.get("topic_domain"):
@@ -806,10 +1071,34 @@ def hard_validation_errors(result: dict[str, Any], data: dict[str, Any]) -> list
         scene_update.get(key) for key in ("location", "time", "activity", "add_open_loops", "close_open_loops")
     ):
         errors.append("当前场景停留过久；应提供两个上下文合理的场景选择，或在用户已选定时自然迁移")
-    return errors
+    reply_opening = str(result.get("reply", "")).replace("\n", " ").strip()[:28]
+    if any(
+        len(reply_opening) >= 10 and (
+            text_similarity(reply_opening, str(old)) >= 0.94
+            or (len(str(old).strip()) >= 10 and (reply_opening.startswith(str(old).strip()) or str(old).strip().startswith(reply_opening)))
+        )
+        for old in data.get("recent_reply_openings", [])[-80:]
+    ):
+        errors.append("reply 复用了长期历史中的开头句式；必须针对本轮细节重写")
+    arc_update = result.get("arc_update", {}) if isinstance(result.get("arc_update"), dict) else {}
+    beat = str(arc_update.get("last_beat", "")).strip()
+    if beat and any(text_similarity(beat, str(old)) >= 0.94 for old in data.get("recent_story_beats", [])[-32:]):
+        errors.append("关系剧情节点与历史节点重复；必须推进新的证据、让步、行动或关系含义")
+    current_arc = data.get("arc") if isinstance(data.get("arc"), dict) else {}
+    current_phase = str(current_arc.get("phase", "试探"))
+    next_phase = str(arc_update.get("phase", ""))
+    if current_phase in ARC_PHASES and next_phase in ARC_PHASES:
+        if ARC_PHASES.index(next_phase) > ARC_PHASES.index(current_phase) + 1:
+            errors.append("关系阶段跨越过快；每轮最多推进一个阶段，不能从矛盾直接跳到亲密或确认")
+    arc_age = int(data.get("turns", 0) or 0) - int(current_arc.get("started_at_turn", 0) or 0)
+    if arc_update.get("resolved") is True and arc_age < 3 and not re.search(r"道歉|我承认|说清楚|误会解开|解决", latest_text):
+        errors.append("核心矛盾解决得过快；至少先交换立场并完成一次可见行动")
+    return [adapt_character_text(error, data) for error in errors]
 
 
-def parse_model_json(content: str) -> dict[str, Any]:
+def parse_model_json(
+    content: str, character: dict[str, Any] | None = None
+) -> dict[str, Any]:
     cleaned = content.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -823,16 +1112,20 @@ def parse_model_json(content: str) -> dict[str, Any]:
 
     if not isinstance(result, dict):
         raise ValueError("模型返回格式不是对象")
-    return normalize_result(result)
+    return normalize_result(result, character)
 
 
-def repair_model_output(raw_content: str, original_messages: list[dict[str, str]]) -> dict[str, Any]:
+def repair_model_output(
+    raw_content: str,
+    original_messages: list[dict[str, str]],
+    character: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     repair_messages = [
         {
             "role": "system",
             "content": (
                 "把给定内容整理成合法 JSON，只做格式整理，不增加新剧情。必须包含 reply、narration、suggestions、"
-                "memory_updates、topic、conversation_move、interaction_pattern、topic_domain、initiative、scene_update、life_update、"
+                "memory_updates、topic、conversation_move、interaction_pattern、topic_domain、initiative、topic_source、arc_update、scene_update、life_update、"
                 "user_message_type、user_action_narration；suggestions 必须有两个符合上下文的用户回复。"
             ),
         },
@@ -841,26 +1134,32 @@ def repair_model_output(raw_content: str, original_messages: list[dict[str, str]
     ]
     payload = request_model(repair_messages, temperature=0.4, max_tokens=600)
     content = extract_content(payload)
-    return parse_model_json(content)
+    return parse_model_json(content, character)
 
 
-def regenerate_after_format_failure(original_messages: list[dict[str, str]], failure: str) -> dict[str, Any]:
+def regenerate_after_format_failure(
+    original_messages: list[dict[str, str]],
+    failure: str,
+    character: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    character = character or get_character()
+    terms = character_terms(character)
     context = json.dumps(original_messages[-12:], ensure_ascii=False)
     retry_messages = [
         {
             "role": "system",
             "content": (
-                "你是林晚，24岁，成都插画师。根据给定聊天上下文自然回复用户最后一句。"
+                f"你是{terms['name']}，{character['age']}岁，{character['city']}{character['occupation']}。根据给定聊天上下文自然回复用户最后一句。"
                 "不要复读用户，不要使用客服话术。台词只写说出口的话，动作放旁白。"
                 "不要输出JSON或代码块。严格按以下八行纯文本输出，每个标签只出现一次：\n"
-                + "REPLY: 林晚说出口的话\n"
+                + f"REPLY: {terms['name']}说出口的话\n"
                 + "NARRATION: 场景旁白，没有则写NONE\n"
                 + "OPTION_A: 用户可选回复A\n"
                 + "OPTION_B: 用户可选回复B\n"
                 + "TOPIC: 核心话题\n"
                 + "MOVE: 本轮采用的推进方式\n"
                 + "TOPIC_DOMAIN: 关系试探等规定话题域\n"
-                + "INITIATIVE: 女主主动或自然回应\n"
+                + f"INITIATIVE: {terms['lead']}主动或自然回应\n"
                 + "USER_TYPE: dialogue或action\n"
                 + "USER_ACTION: 用户动作旁白，没有则写NONE"
             ),
@@ -868,10 +1167,12 @@ def regenerate_after_format_failure(original_messages: list[dict[str, str]], fai
         {"role": "user", "content": "聊天上下文：" + context + "\n上次格式错误：" + failure},
     ]
     payload = request_model(retry_messages, temperature=0.7, max_tokens=500, json_mode=False)
-    return parse_tagged_output(extract_content(payload))
+    return parse_tagged_output(extract_content(payload), character)
 
 
-def parse_tagged_output(content: str) -> dict[str, Any]:
+def parse_tagged_output(
+    content: str, character: dict[str, Any] | None = None
+) -> dict[str, Any]:
     fields: dict[str, str] = {}
     for line in content.strip().splitlines():
         if ":" not in line:
@@ -894,14 +1195,16 @@ def parse_tagged_output(content: str) -> dict[str, Any]:
         "initiative": fields.get("INITIATIVE", "自然回应"),
         "user_message_type": fields.get("USER_TYPE", "dialogue").lower(),
         "user_action_narration": "" if fields.get("USER_ACTION", "").upper() == "NONE" else fields.get("USER_ACTION", ""),
-    })
+    }, character)
 
 
-def parse_model_output(content: str) -> dict[str, Any]:
+def parse_model_output(
+    content: str, character: dict[str, Any] | None = None
+) -> dict[str, Any]:
     stripped = content.strip()
     if stripped.startswith("{") or stripped.startswith("```json"):
-        return parse_model_json(content)
-    return parse_tagged_output(content)
+        return parse_model_json(content, character)
+    return parse_tagged_output(content, character)
 
 
 def rewrite_invalid_result(
@@ -910,10 +1213,12 @@ def rewrite_invalid_result(
     original_messages: list[dict[str, str]],
     data: dict[str, Any],
 ) -> dict[str, Any]:
+    character = get_character(data)
     rewrite_messages = [
         {
             "role": "system",
-            "content": (
+            "content": adapt_character_text(
+                (
                 "你是对话质量编辑器，负责把林晚的一轮失败回复整轮重写成合法 JSON。"
                 "失败回复只能作为反例，禁止照抄句式、笑点和选项。reply 只能是林晚说出口的话。"
                 "当错误涉及连续轻松对抗时：最多用半句话承认用户的玩笑，随后必须回到当前场景、"
@@ -929,7 +1234,11 @@ def rewrite_invalid_result(
                 "若用户正在问喜欢、在意、吃醋或关系，必须留在原地直接回答，禁止借换场回避。若需要换场但用户没有选，"
                 "给出两个结合时间和上下文的反差场景，两个 suggestions 分别对应选择，scene_update.location 留空；用户选定后才能迁移。"
                 "禁止再次默认去工作室、画馆、画廊或咖啡馆。"
+                "主动话题必须来自用户当前话语、当前矛盾、未完成事件、共同约定、长期记忆或角色生活线，"
+                "不得随机跳题。arc_update 必须记录本轮新增节点，不能一轮解决长期矛盾。"
                 "scene_update 和 life_update 只记录本轮真实发生的变化。只输出 JSON。"
+                ),
+                data,
             ),
         },
         {
@@ -938,12 +1247,16 @@ def rewrite_invalid_result(
                 {
                     "最近上下文": original_messages[-8:],
                     "失败回复": result,
-                    "必须修复的问题": errors,
-                    "最近选项": data.get("recent_suggestions", [])[-12:],
+                    "必须修复的问题": [adapt_character_text(error, data) for error in errors],
+                    "最近选项": data.get("recent_suggestions", [])[-40:],
                     "最近话题域": data.get("recent_topic_domains", [])[-8:],
                     "最近主动性": data.get("recent_initiatives", [])[-6:],
+                    "最近话题来源": data.get("recent_topic_sources", [])[-12:],
+                    "最近剧情节点": data.get("recent_story_beats", [])[-24:],
+                    "禁止复用的回复开头": data.get("recent_reply_openings", [])[-60:],
                     "本轮禁用的疲劳素材": saturated_surface_families(data),
                     "当前场景": data.get("scene", {}),
+                    "当前关系弧线": data.get("arc", {}),
                     "当前场景轮数": data.get("scene_age_turns", 0),
                     "成熟暧昧模式": data.get("mature_mode") is True and data.get("adult_confirmed") is True,
                 },
@@ -952,7 +1265,7 @@ def rewrite_invalid_result(
         },
     ]
     payload = request_model(rewrite_messages, temperature=0.62, max_tokens=750, json_mode=True)
-    return parse_model_json(extract_content(payload))
+    return parse_model_json(extract_content(payload), character)
 
 
 def fallback_suggestions(result: dict[str, Any], data: dict[str, Any]) -> list[str]:
@@ -974,7 +1287,7 @@ def fallback_suggestions(result: dict[str, Any], data: dict[str, Any]) -> list[s
             "我想听一件和工作无关、但很像你的事。",
             "我们换个玩法，各说一个不太愿意承认的偏好。",
         ]
-    recent = [str(item) for item in data.get("recent_suggestions", [])[-16:]]
+    recent = [str(item) for item in data.get("recent_suggestions", [])[-60:]]
     chosen: list[str] = []
     for candidate in candidates:
         if all(text_similarity(candidate, old) < 0.88 for old in recent + chosen):
@@ -1044,23 +1357,61 @@ def request_model(messages: list[dict[str, str]], *, temperature: float, max_tok
         raise RuntimeError("DeepSeek响应超时，请稍后重试。") from exc
 
 
+def memory_search_text(data: dict[str, Any]) -> str:
+    parts = [str(data.get("latest_message", ""))]
+    history = data.get("messages", [])
+    if isinstance(history, list):
+        parts.extend(
+            str(item.get("text", ""))
+            for item in history[-8:]
+            if isinstance(item, dict)
+        )
+    scene = data.get("scene", {})
+    if isinstance(scene, dict):
+        parts.extend(str(scene.get(key, "")) for key in ("location", "activity"))
+    return "\n".join(parts)
+
+
+def prepare_memory_context(data: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    namespace = normalize_namespace(data.get("memory_id"))
+    if not namespace:
+        return data, ""
+    WORLD_BOOK.import_legacy(namespace, data.get("memories", []))
+    enriched = dict(data)
+    enriched["retrieved_memories"] = WORLD_BOOK.search(
+        namespace, memory_search_text(data), limit=8
+    )
+    return enriched, namespace
+
+
+def persist_result_memories(result: dict[str, Any], namespace: str) -> dict[str, Any]:
+    if not namespace:
+        return result
+    result["stored_memories"] = WORLD_BOOK.apply_updates(
+        namespace, result.get("memory_updates", [])
+    )
+    return result
+
+
 def call_model(data: dict[str, Any]) -> dict[str, Any]:
     if not AI_API_KEY:
         raise RuntimeError("尚未配置 DeepSeek API Key。请复制 .env.example 为 .env，填入 AI_API_KEY 后重启服务。")
 
     request_started = time.monotonic()
     latest = str(data.get("latest_message", ""))
+    data, memory_namespace = prepare_memory_context(data)
+    character = get_character(data)
     log_event(f"chat start turns={data.get('turns', 0)} chars={len(latest)}")
     messages = build_messages(data)
     used_retry = False
     payload = request_model(messages, temperature=0.72, max_tokens=750, json_mode=True)
     raw_content = extract_content(payload)
     try:
-        result = parse_model_output(raw_content)
+        result = parse_model_output(raw_content, character)
     except (ValueError, json.JSONDecodeError) as exc:
         used_retry = True
         try:
-            result = repair_model_output(raw_content, messages)
+            result = repair_model_output(raw_content, messages, character)
         except (ValueError, json.JSONDecodeError) as retry_exc:
             raise RuntimeError("DeepSeek 本轮响应不完整，格式修复后仍未成功，请重新发送。") from retry_exc
     result = infer_interaction_pattern(data, infer_user_action(data, result))
@@ -1073,7 +1424,7 @@ def call_model(data: dict[str, Any]) -> dict[str, Any]:
             f"chat complete elapsed={time.monotonic() - request_started:.2f}s "
             f"format_repaired={int(used_retry)} rewritten=0 notes={notes}"
         )
-        return result
+        return persist_result_memories(result, memory_namespace)
 
     if hard_errors:
         try:
@@ -1096,7 +1447,7 @@ def call_model(data: dict[str, Any]) -> dict[str, Any]:
                 f"chat complete elapsed={time.monotonic() - request_started:.2f}s "
                 f"format_repaired={int(used_retry)} rewritten=1"
             )
-            return rewritten
+            return persist_result_memories(rewritten, memory_namespace)
         except (ValueError, json.JSONDecodeError, RuntimeError) as exc:
             log_event(f"chat rewrite failed elapsed={time.monotonic() - request_started:.2f}s reason={exc}")
             raise RuntimeError("DeepSeek正在繁忙，本轮回复未能完成，请重新发送。") from exc
@@ -1122,11 +1473,25 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Expires", "0")
         super().end_headers()
 
+    def clean_request_path(self) -> str:
+        return urllib.parse.unquote(self.path.split("?", 1)[0]).replace("\\", "/")
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.split("?", 1)[0] == "/api/status":
+        clean_path = self.clean_request_path()
+        if clean_path.startswith("/.data/") or clean_path == "/.data":
+            self.send_error(404)
+            return
+        if clean_path == "/api/status":
             self.send_json(200, {"configured": bool(AI_API_KEY), "model": AI_MODEL, "version": APP_VERSION})
             return
         super().do_GET()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        clean_path = self.clean_request_path()
+        if clean_path.startswith("/.data/") or clean_path == "/.data":
+            self.send_error(404)
+            return
+        super().do_HEAD()
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/api/chat":
@@ -1171,7 +1536,7 @@ if __name__ == "__main__":
     print(f"心语 Demo 已启动：http://{HOST}:{PORT}")
     print(f"模型：{AI_MODEL} | 配置状态：{'已配置' if AI_API_KEY else '缺少 AI_API_KEY'}")
     PID_FILE.write_text(str(os.getpid()), encoding="ascii")
-    if os.getenv("APP_OPEN_BROWSER", "1") == "1":
+    if os.getenv("APP_OPEN_BROWSER", "1") == "1" and "--no-browser" not in sys.argv:
         Timer(0.8, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
     try:
         server.serve_forever()

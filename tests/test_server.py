@@ -16,6 +16,22 @@ def valid_result(**overrides):
         "interaction_pattern": "话题转场",
         "topic_domain": "共同计划",
         "initiative": "女主主动",
+        "topic_source": "当前矛盾",
+        "affinity_update": {
+            "delta": 0,
+            "reason": "普通交流，没有形成明确变化",
+            "reaction": "中立",
+            "trigger": "普通交流",
+        },
+        "arc_update": {
+            "phase": "试探",
+            "central_conflict": "",
+            "shared_goal": "",
+            "last_beat": "双方决定先完成眼前的小事",
+            "tension_delta": -2,
+            "trust_delta": 2,
+            "resolved": False,
+        },
         "scene_update": {
             "location": "",
             "time": "",
@@ -39,6 +55,46 @@ def valid_result(**overrides):
 
 
 class ConversationStateTests(unittest.TestCase):
+    def test_affinity_delta_is_clamped_and_negative_change_affects_arc(self):
+        result = server.normalize_result(valid_result(
+            affinity_update={
+                "delta": -99,
+                "reason": "用玩笑回避了明确的安全警告",
+                "reaction": "警惕",
+                "trigger": "油嘴滑舌",
+            },
+            arc_update={
+                "phase": "对峙", "central_conflict": "", "shared_goal": "",
+                "last_beat": "沈岚开始重新判断对方是否可靠",
+                "tension_delta": -4, "trust_delta": 5, "resolved": False,
+            },
+        ), server.get_character({"character_id": "shen-lan"}))
+
+        self.assertEqual(result["affinity_update"]["delta"], -8)
+        self.assertEqual(result["affinity_update"]["trigger"], "油嘴滑舌")
+        self.assertLessEqual(result["arc_update"]["trust_delta"], -2)
+        self.assertGreaterEqual(result["arc_update"]["tension_delta"], 2)
+
+    def test_respectful_disagreement_can_remain_neutral(self):
+        result = server.normalize_result(valid_result(
+            affinity_update={
+                "delta": 0,
+                "reason": "观点不同，但给出了依据并尊重她的专业判断",
+                "reaction": "中立",
+                "trigger": "普通交流",
+            },
+        ))
+
+        self.assertEqual(result["affinity_update"]["delta"], 0)
+        self.assertEqual(result["affinity_update"]["reaction"], "中立")
+
+    def test_shen_lan_prompt_contains_character_specific_values(self):
+        prompt = server.build_system_prompt({"character_id": "shen-lan"})
+
+        self.assertIn("正义、诚实、规则意识、为选择承担责任", prompt)
+        self.assertIn("油嘴滑舌、撒谎、逞强、拿违法和他人安全开玩笑", prompt)
+        self.assertIn("不得惩罚有依据且尊重人的不同意见", prompt)
+
     def test_normalize_result_preserves_structured_updates(self):
         result = server.normalize_result(valid_result())
 
@@ -472,6 +528,110 @@ class ConversationStateTests(unittest.TestCase):
 
         self.assertEqual(parsed["reply"], valid_result()["reply"])
         self.assertEqual(parsed["interaction_pattern"], "话题转场")
+
+    def test_male_character_prompt_switches_user_to_adult_woman(self):
+        prompt = server.build_system_prompt({"character_id": "zhou-xu"})
+
+        self.assertIn("周叙，28岁，住在南京，职业是急诊医生", prompt)
+        self.assertIn("女性用户“你”和男性周叙", prompt)
+        self.assertIn("符合成年女性表达", prompt)
+        self.assertNotIn("林晚", prompt)
+
+    def test_male_character_action_and_initiative_are_normalized(self):
+        character = server.get_character({"character_id": "zhou-xu"})
+        result = server.normalize_result(valid_result(
+            reply="我抬手示意你别松开。伤口不深。",
+            initiative="女主主动",
+        ), character)
+
+        self.assertEqual(result["reply"], "伤口不深。")
+        self.assertEqual(result["narration"], "周叙抬手示意你别松开。")
+        self.assertEqual(result["initiative"], "男主主动")
+
+    def test_female_user_action_targets_male_character(self):
+        character = server.get_character({"character_id": "zhou-xu"})
+        result = server.infer_user_action(
+            {"character_id": "zhou-xu", "latest_message": "握住他的手，让他别逞强"},
+            server.normalize_result(valid_result(), character),
+        )
+
+        self.assertEqual(result["user_message_type"], "action")
+        self.assertEqual(result["user_action_narration"], "你握住周叙的手，让周叙别逞强。")
+
+    def test_narration_pronouns_follow_selected_character_gender(self):
+        male = server.get_character({"character_id": "zhou-xu"})
+        female = server.get_character({"character_id": "xu-tang"})
+
+        self.assertEqual(server.normalize_scene_narration("他看着她。", male), "周叙看着你。")
+        self.assertEqual(server.normalize_scene_narration("她看着他。", female), "许棠看着你。")
+
+    def test_profession_backgrounds_include_police_and_doctor(self):
+        self.assertEqual(server.get_character({"character_id": "shen-lan"})["occupation"], "刑警")
+        self.assertEqual(server.get_character({"character_id": "zhou-xu"})["occupation"], "急诊医生")
+
+    def test_director_continues_conflict_instead_of_random_topic(self):
+        data = {
+            "turns": 9,
+            "latest_message": "继续说。",
+            "arc": {
+                "phase": "对峙",
+                "central_conflict": "两人对测试结果的解释不同",
+                "shared_goal": "完成三组玩家测试",
+            },
+        }
+
+        move = server.choose_director_move(data)
+
+        self.assertIn("话题来源=当前矛盾", move)
+        self.assertIn("两人对测试结果的解释不同", move)
+        self.assertNotIn("随机", move)
+
+    def test_relationship_arc_cannot_jump_multiple_phases(self):
+        result = server.normalize_result(valid_result(arc_update={
+            "phase": "暧昧",
+            "last_beat": "突然确认彼此心动",
+            "tension_delta": -10,
+            "trust_delta": 8,
+            "resolved": False,
+        }))
+
+        errors = server.hard_validation_errors(result, {
+            "turns": 2,
+            "arc": {"phase": "对峙", "started_at_turn": 0},
+        })
+
+        self.assertTrue(any("跨越过快" in error for error in errors))
+
+    def test_long_term_reply_opening_and_story_beat_are_rejected(self):
+        result = server.normalize_result(valid_result(
+            reply="我先认输，这个玩法再加码就没完了。不过测试还没结束。",
+            arc_update={"phase": "试探", "last_beat": "双方决定先完成眼前的小事"},
+        ))
+
+        errors = server.hard_validation_errors(result, {
+            "recent_reply_openings": ["我先认输，这个玩法再加码就没完了"],
+            "recent_story_beats": ["双方决定先完成眼前的小事"],
+        })
+
+        self.assertTrue(any("开头句式" in error for error in errors))
+        self.assertTrue(any("剧情节点" in error for error in errors))
+
+    def test_arc_update_and_topic_source_are_normalized(self):
+        result = server.normalize_result(valid_result(
+            topic_source="凭空发挥",
+            arc_update={
+                "phase": "松动",
+                "last_beat": "许棠承认测试标准有一部分合理",
+                "tension_delta": -99,
+                "trust_delta": 99,
+                "resolved": False,
+            },
+        ))
+
+        self.assertEqual(result["topic_source"], "用户当前话语")
+        self.assertEqual(result["arc_update"]["phase"], "松动")
+        self.assertEqual(result["arc_update"]["tension_delta"], -12)
+        self.assertEqual(result["arc_update"]["trust_delta"], 8)
 
 
 if __name__ == "__main__":

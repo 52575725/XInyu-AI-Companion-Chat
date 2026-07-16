@@ -6,12 +6,12 @@
     <meta name="theme-color" content="#f7f8f9" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23ef6f78'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-size='34' fill='white'%3E%E5%BF%83%3C/text%3E%3C/svg%3E" />
     <title>心语 · AI 陪伴对话 Demo</title>
-    <link rel="stylesheet" href="styles.css?v=20260716.5" />
+    <link rel="stylesheet" href="styles.css?v=20260716.15" />
   </head>
   <body>
     <main class="app-shell">
       <section class="phone" aria-label="AI 陪伴聊天演示">
-        <aside class="companion-panel" aria-label="林晚的人物状态">
+        <aside class="companion-panel" id="companionPanel" aria-label="人物状态">
           <div class="brand-lockup">
             <span class="brand-symbol" aria-hidden="true">心</span>
             <div>
@@ -20,16 +20,16 @@
             </div>
           </div>
 
-          <div class="companion-portrait">
-            <img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="林晚的插画头像" />
+          <div class="companion-portrait character-avatar" id="companionPortrait">
+            <img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="" />
           </div>
 
           <div class="companion-intro">
-            <p>林晚</p>
-            <span>24 岁 · 成都 · 自由插画师</span>
+            <p id="companionName">林晚</p>
+            <span id="companionMeta">24 岁 · 成都 · 自由插画师</span>
           </div>
 
-          <div class="persona-tags" aria-label="人物标签">
+          <div class="persona-tags" id="personaTags" aria-label="人物标签">
             <span>慢热</span>
             <span>旧电影</span>
             <span>晚风</span>
@@ -49,17 +49,21 @@
 
         <section class="conversation-panel">
           <header class="chat-header">
-            <div class="brand-mark" aria-hidden="true">
+            <div class="brand-mark character-avatar" id="headerAvatar" aria-hidden="true">
               <img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="" />
             </div>
             <div class="profile-copy">
               <div class="name-line">
-                <h1>林晚</h1>
+                <h1 id="characterName">林晚</h1>
                 <span class="online-dot"></span>
                 <span class="online-text">在线</span>
               </div>
               <p id="relationshipText">刚刚认识 · 慢慢了解彼此</p>
             </div>
+            <label class="character-switcher" title="切换角色">
+              <span>角色</span>
+              <select id="characterSelect" aria-label="切换聊天角色"></select>
+            </label>
             <button class="icon-button" id="memoryButton" type="button" aria-label="查看记忆" title="查看记忆">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
             </button>
@@ -70,6 +74,7 @@
             <div class="progress-track" aria-label="关系进度">
               <i id="progressBar"></i>
             </div>
+            <span id="affinityFeedback" aria-live="polite"></span>
             <span id="turnCounter">0 / 100 轮</span>
           </div>
 
@@ -78,6 +83,18 @@
             <span>此刻</span>
             <strong id="momentText">傍晚 · 在便利店门口的屋檐下躲雨</strong>
           </div>
+
+          <section class="story-strip" aria-label="当前关系线">
+            <span class="story-phase" id="storyPhase">试探</span>
+            <div class="story-copy">
+              <strong id="storyConflict">彼此仍在判断要不要继续靠近</strong>
+              <small id="storyGoal">把当前事件处理清楚</small>
+            </div>
+            <div class="arc-scores" aria-label="关系状态">
+              <span><b>信任</b><i><em id="trustBar"></em></i></span>
+              <span><b>张力</b><i><em id="tensionBar"></em></i></span>
+            </div>
+          </section>
 
           <section class="messages" id="messages" aria-live="polite" aria-label="聊天记录"></section>
 
@@ -112,8 +129,8 @@
     <aside class="memory-drawer" id="memoryDrawer" aria-label="记忆与人设" aria-hidden="true">
       <div class="drawer-head">
         <div>
-          <span>ABOUT HER</span>
-          <h2>林晚的记忆</h2>
+          <span id="drawerEyebrow">ABOUT HER</span>
+          <h2 id="drawerTitle">林晚的记忆</h2>
         </div>
         <button class="icon-button" id="closeDrawer" type="button" aria-label="关闭" title="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
@@ -121,20 +138,20 @@
       </div>
 
       <div class="persona-card">
-        <div class="avatar avatar-large"><img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="" /></div>
+        <div class="avatar avatar-large character-avatar" id="drawerAvatar"><img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="" /></div>
         <div>
-          <strong>林晚 · 24岁</strong>
-          <p>成都 · 插画师</p>
+          <strong id="drawerProfileName">林晚 · 24岁</strong>
+          <p id="drawerProfileMeta">成都 · 插画师</p>
         </div>
       </div>
 
       <section class="drawer-section">
         <h3>固定人设</h3>
-        <p>温柔、细腻、有一点慢热。喜欢插画、晚风、猫和旧电影；表达自然，不说教，也不会突然改变身份与经历。</p>
+        <p id="personaDescription">温柔、细腻、有一点慢热。喜欢插画、晚风、猫和旧电影。</p>
       </section>
 
       <section class="drawer-section">
-        <h3>她记住的你</h3>
+        <h3 id="memoryOwnerLabel">她记住的你</h3>
         <ul class="memory-list" id="memoryList"></ul>
       </section>
 
@@ -165,7 +182,7 @@
 
     <template id="messageTemplate">
       <article class="message-row">
-        <div class="avatar"><img src="assets/avatars/lin-wan-avatar.png?v=20260716.4" alt="" /></div>
+        <div class="avatar character-avatar"></div>
         <div class="message-content">
           <div class="bubble"></div>
           <time></time>
@@ -173,6 +190,7 @@
       </article>
     </template>
 
-    <script src="app.js?v=20260716.9"></script>
+    <script src="characters.js?v=20260716.15"></script>
+    <script src="app.js?v=20260716.15"></script>
   </body>
 </html>

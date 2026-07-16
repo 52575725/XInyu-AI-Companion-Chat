@@ -25,7 +25,7 @@ async function inspectViewport(browser, viewport) {
 
   const metrics = await page.evaluate(() => {
     const selectorMetrics = {};
-    for (const selector of ["#memoryButton", "#sendButton", "#optionA", "#optionB", "#messageInput"]) {
+    for (const selector of ["#memoryButton", "#characterSelect", "#storyPhase", "#sendButton", "#optionA", "#optionB", "#messageInput"]) {
       const element = document.querySelector(selector);
       const rect = element.getBoundingClientRect();
       selectorMetrics[selector] = {
