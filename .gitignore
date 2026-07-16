@@ -1,0 +1,9 @@
+.env
+__pycache__/
+.playwright-mcp/
+.tools/
+request.log
+startup.log
+server.pid
+public-server*.log
+cloudflared*.log
