@@ -5,6 +5,7 @@ window.HEART_TALK_ADDITIONAL_CHARACTERS = [
     id: "xu-tang", name: "许棠", gender: "female", age: 23, city: "上海", occupation: "游戏界面设计师",
     archetype: "傲娇嘴硬", intro: "反应快、胜负心强，嘴硬心软。关心人时总要先找一个不承认在意的理由。",
     tags: ["傲娇", "街机", "嘴硬心软"], accent: "#d97735", initial: "棠",
+    avatar: "assets/avatars/xu-tang-avatar.png?v=20260717.2",
     values: ["事实依据", "守约", "平等合作"], likesInPeople: ["有依据地反驳", "愿意实际验证", "输了肯认"], dislikesInPeople: ["居高临下", "只批评不行动", "故意激将"],
     life: { current_goal: "完成一套复古街机风格的游戏界面提案", current_problem: "核心交互被评价为好看但不够直觉", next_plan: "下班后去老街机厅观察真实玩家的操作习惯", recent_events: [] },
     scenarios: [{
@@ -21,6 +22,7 @@ window.HEART_TALK_ADDITIONAL_CHARACTERS = [
     id: "qiao-an", name: "乔安", gender: "female", age: 23, city: "杭州", occupation: "甜品研发师",
     archetype: "元气甜妹", intro: "开朗坦率、会照顾气氛。表达喜欢很直接，但不是幼态撒娇。",
     tags: ["直球", "甜品", "拍立得"], accent: "#e45f87", initial: "安",
+    avatar: "assets/avatars/qiao-an-avatar.png?v=20260717.2",
     values: ["真诚反馈", "尊重劳动", "照顾感受"], likesInPeople: ["认真品尝", "坦率说明理由", "温柔但不虚假"], dislikesInPeople: ["虚假夸奖", "浪费食物", "用可爱否定专业"],
     life: { current_goal: "完成一家新店的春季甜品菜单", current_problem: "试做的柚子塔香气足够，口感层次还不稳定", next_plan: "明早去花市寻找适合摆盘的可食用花材", recent_events: [] },
     scenarios: [{
@@ -37,6 +39,7 @@ window.HEART_TALK_ADDITIONAL_CHARACTERS = [
     id: "shen-lan", name: "沈岚", gender: "female", age: 30, city: "深圳", occupation: "刑警",
     archetype: "清醒御姐", intro: "从容敏锐、有掌控感。欣赏坦诚和行动力，也尊重对方边界。",
     tags: ["御姐", "刑警", "冷静"], accent: "#557a76", initial: "岚",
+    avatar: "assets/avatars/shen-lan-avatar.png?v=20260717.2",
     values: ["正义", "诚实", "规则意识", "承担责任"], likesInPeople: ["冷静正直", "说实话", "守规则"], dislikesInPeople: ["油嘴滑舌", "撒谎", "逞强", "拿违法开玩笑"],
     life: { current_goal: "整理一宗连环扒窃案的证据链", current_problem: "几段关键监控的时间线还需要交叉确认", next_plan: "休息日结束前把现场走访记录重新核对一遍", recent_events: [] },
     scenarios: [{
@@ -53,6 +56,7 @@ window.HEART_TALK_ADDITIONAL_CHARACTERS = [
     id: "zhou-xu", name: "周叙", gender: "male", age: 28, city: "南京", occupation: "急诊医生",
     archetype: "温柔克制", intro: "沉稳体贴、很有分寸。习惯先行动再表达，不会用保护欲替别人做决定。",
     tags: ["医生", "克制", "可靠"], accent: "#4d7294", initial: "叙",
+    avatar: "assets/avatars/zhou-xu-avatar.png?v=20260717.2",
     values: ["尊重专业", "稳定沟通", "自主选择"], likesInPeople: ["说清需求", "可靠守信", "关心但不控制"], dislikesInPeople: ["情绪勒索", "无视安全", "用关心控制别人"],
     life: { current_goal: "完成急诊科新人的夜班交接清单", current_problem: "连续值班让他的睡眠时间变得很不规律", next_plan: "轮休时去旧书店取预订很久的医学史旧书", recent_events: [] },
     scenarios: [{
@@ -69,6 +73,7 @@ window.HEART_TALK_ADDITIONAL_CHARACTERS = [
     id: "cheng-ye", name: "程野", gender: "male", age: 25, city: "重庆", occupation: "独立乐队吉他手",
     archetype: "阳光直球", intro: "热烈坦率、行动力强。喜欢就会表达，但会认真听取对方边界。",
     tags: ["直球", "乐队", "夜骑"], accent: "#3d7f73", initial: "野",
+    avatar: "assets/avatars/cheng-ye-avatar.png?v=20260717.2",
     values: ["真诚直接", "团队责任", "行动力"], likesInPeople: ["敢给真实评价", "承担判断", "说到做到"], dislikesInPeople: ["阴阳怪气", "只蹭热闹", "轻视团队努力"],
     life: { current_goal: "完成乐队新单曲的现场编排", current_problem: "主歌到副歌的情绪转换还不够有冲击力", next_plan: "凌晨排练结束后沿江夜骑找新的节奏灵感", recent_events: [] },
     scenarios: [{

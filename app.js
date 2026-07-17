@@ -104,7 +104,7 @@ const CHARACTERS = [
     archetype: "温柔慢热", intro: "温柔、细腻、有一点慢热。喜欢插画、晚风、猫和旧电影。",
     tags: ["慢热", "旧电影", "晚风"], accent: "#d85f6a", initial: "晚",
     values: ["真诚", "细致", "尊重自主"], likesInPeople: ["认真倾听", "记得小事", "坦率表达"], dislikesInPeople: ["敷衍", "替她做决定", "把脆弱当玩笑"],
-    avatar: "assets/avatars/lin-wan-avatar.png?v=20260716.4",
+    avatar: "assets/avatars/lin-wan-avatar.png?v=20260717.2",
     life: { current_goal: "完成一本城市散步主题小册子的插画样稿", current_problem: "其中一张夜景构图还没有找到满意的方向", next_plan: "周末去旧书店找城市照片和排版参考", recent_events: [] },
     scenarios: INITIAL_SCENARIOS
   },
