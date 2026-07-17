@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import server
+import conversation_engine as server
 from worldbook import WorldbookMemoryStore, create_namespace, normalize_memory_update, normalize_namespace
 
 
@@ -117,7 +117,7 @@ class WorldbookMemoryTests(unittest.TestCase):
             "messages": [],
         }
 
-        with patch("server.WORLD_BOOK", self.store):
+        with patch("conversation_engine.WORLD_BOOK", self.store):
             enriched, namespace = server.prepare_memory_context(data)
 
         self.assertEqual(namespace, self.namespace)

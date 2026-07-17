@@ -8,3 +8,4 @@ startup.log
 server.pid
 public-server*.log
 cloudflared*.log
+quick-tunnel*.log

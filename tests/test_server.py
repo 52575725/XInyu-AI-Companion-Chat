@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-import server
+import conversation_engine as server
 
 
 def valid_result(**overrides):
@@ -458,7 +458,7 @@ class ConversationStateTests(unittest.TestCase):
         self.assertIn("成熟暧昧推进", move)
         self.assertIn("亲吻", move)
 
-    @patch("server.request_model")
+    @patch("conversation_engine.request_model")
     def test_format_repair_still_runs_quality_rewrite(self, request_model):
         repaired = valid_result(topic_domain="关系试探", initiative="自然回应")
         rewritten = valid_result(topic_domain="约会偏好", initiative="女主主动")
@@ -480,7 +480,7 @@ class ConversationStateTests(unittest.TestCase):
         self.assertEqual(result["topic_domain"], "约会偏好")
         self.assertEqual(result["initiative"], "女主主动")
 
-    @patch("server.request_model")
+    @patch("conversation_engine.request_model")
     def test_domain_only_rewrite_failure_does_not_drop_reply(self, request_model):
         repeated = valid_result(
             reply="走吧，我们上楼再说。",
@@ -503,7 +503,7 @@ class ConversationStateTests(unittest.TestCase):
         self.assertEqual(result["reply"], "走吧，我们上楼再说。")
         self.assertNotEqual(result["topic_domain"], "共同计划")
 
-    @patch("server.request_model")
+    @patch("conversation_engine.request_model")
     def test_repeated_suggestions_use_local_fallback_instead_of_error(self, request_model):
         repeated = valid_result(
             reply="我是在意，所以才想听你认真说。",
@@ -568,6 +568,52 @@ class ConversationStateTests(unittest.TestCase):
     def test_profession_backgrounds_include_police_and_doctor(self):
         self.assertEqual(server.get_character({"character_id": "shen-lan"})["occupation"], "刑警")
         self.assertEqual(server.get_character({"character_id": "zhou-xu"})["occupation"], "急诊医生")
+
+    def test_chat_payload_is_bounded_on_the_server(self):
+        payload = server.sanitize_chat_payload({
+            "latest_message": "问" * 3000,
+            "turns": "not-a-number",
+            "messages": [
+                {"role": "user", "text": f"第{index}条" + "长" * 3000}
+                for index in range(60)
+            ] + [{"role": "system", "text": "不应接受"}],
+            "recent_topics": [f"话题{index}" for index in range(100)],
+        })
+
+        self.assertEqual(len(payload["latest_message"]), 2000)
+        self.assertEqual(payload["turns"], 0)
+        self.assertEqual(len(payload["messages"]), 39)
+        self.assertTrue(all(len(item["text"]) <= 2000 for item in payload["messages"]))
+        self.assertEqual(len(payload["recent_topics"]), 60)
+
+    def test_static_server_only_exposes_demo_assets(self):
+        self.assertTrue(server.is_allowed_static_path("/"))
+        self.assertTrue(server.is_allowed_static_path("/assets/avatars/lin-wan-avatar.png"))
+        self.assertFalse(server.is_allowed_static_path("/.env"))
+        self.assertFalse(server.is_allowed_static_path("/.git/HEAD"))
+        self.assertFalse(server.is_allowed_static_path("/request.log"))
+        self.assertFalse(server.is_allowed_static_path("/server.py"))
+
+    @patch("conversation_engine.request_model")
+    def test_quality_rewrite_failure_returns_degraded_first_reply(self, request_model):
+        first = valid_result(
+            suggestions=["什么条件？", "那你先说清楚。"],
+            topic_domain="关系试探",
+        )
+        request_model.side_effect = [
+            {"choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}]},
+            RuntimeError("rewrite unavailable"),
+        ]
+
+        with patch.object(server, "AI_API_KEY", "test-key"):
+            result = server.call_model({
+                "latest_message": "你是不是很在意？",
+                "recent_suggestions": ["什么条件？", "那你先说清楚。"],
+                "messages": [{"role": "user", "text": "你是不是很在意？"}],
+            })
+
+        self.assertEqual(result["reply"], first["reply"])
+        self.assertNotEqual(result["suggestions"], first["suggestions"])
 
     def test_director_continues_conflict_instead_of_random_topic(self):
         data = {
