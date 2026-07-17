@@ -29,7 +29,7 @@ class BackendModuleBoundaryTests(unittest.TestCase):
         self.assertEqual(clean["messages"], [])
 
     def test_runtime_version_is_exposed(self):
-        self.assertEqual(APP_VERSION, "2026.07.17.2")
+        self.assertEqual(APP_VERSION, "2026.07.17.3")
 
 
 if __name__ == "__main__":
